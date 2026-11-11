@@ -1,143 +1,143 @@
-#![windows_subsystem = "windows"]
-
-use std::ffi::c_void;
-use std::mem::zeroed;
+use std::env;
+use std::fs;
+use std::path::Path;
 use std::process::Command;
-use std::ptr::null_mut;
-use std::thread;
-use std::time::Duration;
 
-type Hwnd = *mut c_void;
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    MessageBoxW, IDYES, MB_ICONQUESTION, MB_ICONERROR, MB_ICONINFORMATION, MB_YESNO,
+};
 
-#[repr(C)]
-struct Kbd {
-    vk_code: u32,
-    scan_code: u32,
-    flags: u32,
-    time: u32,
-    extra: usize,
-}
+const NATIVO: &str = r"C:\Windows\SystemApps\MicrosoftWindows.Client.CBS_cw5n1h2txyewy\ScreenClippingHost.exe";
+const DESTINO_DIR: &str = r"C:\Programas";
 
-#[repr(C)]
-struct Msg {
-    hwnd: Hwnd,
-    message: u32,
-    wparam: usize,
-    lparam: isize,
-    time: u32,
-    pt_x: i32,
-    pt_y: i32,
-}
+// ---------- helpers de interface ----------
 
-#[link(name = "user32")]
-extern "system" {
-    fn SetWindowsHookExW(
-        id: i32,
-        proc_: unsafe extern "system" fn(i32, usize, isize) -> isize,
-        hmod: *mut c_void,
-        tid: u32,
-    ) -> *mut c_void;
-    fn CallNextHookEx(h: *mut c_void, code: i32, w: usize, l: isize) -> isize;
-    fn GetMessageW(msg: *mut Msg, hwnd: Hwnd, min: u32, max: u32) -> i32;
-    fn GetAsyncKeyState(vk: i32) -> i16;
-    fn keybd_event(vk: u8, scan: u8, flags: u32, extra: usize);
-    fn FindWindowW(class: *const u16, title: *const u16) -> Hwnd;
-    fn SetForegroundWindow(h: Hwnd) -> i32;
-}
-
-#[link(name = "kernel32")]
-extern "system" {
-    fn GetModuleHandleW(name: *const u16) -> *mut c_void;
-    fn CreateMutexW(attr: *mut c_void, owner: i32, name: *const u16) -> *mut c_void;
-    fn GetLastError() -> u32;
-}
-
-fn wide(s: &str) -> Vec<u16> {
+fn para_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-fn tecla_pressionada(vk: i32) -> bool {
-    unsafe { GetAsyncKeyState(vk) < 0 }
-}
-
-fn achar_janela() -> Hwnd {
-    let t1 = wide("Ferramenta de Captura");
-    let t2 = wide("Snipping Tool");
+/// Mostra uma caixa Sim/Não. Retorna true se o usuário clicou em "Sim".
+fn perguntar(titulo: &str, texto: &str) -> bool {
+    let t = para_wide(texto);
+    let tit = para_wide(titulo);
     unsafe {
-        let h = FindWindowW(std::ptr::null(), t1.as_ptr());
-        if !h.is_null() {
-            return h;
-        }
-        FindWindowW(std::ptr::null(), t2.as_ptr())
-    }
-}
-
-fn capturar() {
-    let mut h = achar_janela();
-    if h.is_null() {
-        let _ = Command::new("snippingtool.exe").spawn();
-        for _ in 0..100 {
-            thread::sleep(Duration::from_millis(30));
-            h = achar_janela();
-            if !h.is_null() {
-                break;
-            }
-        }
-    }
-    if h.is_null() {
-        return;
-    }
-
-    // espera soltar Win e Shift, senao o Ctrl+N vira Win+Shift+Ctrl+N
-    for _ in 0..40 {
-        if !tecla_pressionada(0x5B) && !tecla_pressionada(0x5C) && !tecla_pressionada(0x10) {
-            break;
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-
-    unsafe {
-        SetForegroundWindow(h);
-    }
-    thread::sleep(Duration::from_millis(120));
-    unsafe {
-        keybd_event(0x11, 0, 0, 0); // Ctrl
-        keybd_event(0x4E, 0, 0, 0); // N
-        keybd_event(0x4E, 0, 2, 0);
-        keybd_event(0x11, 0, 2, 0);
+        let r = MessageBoxW(
+            std::ptr::null_mut(),
+            t.as_ptr(),
+            tit.as_ptr(),
+            MB_YESNO | MB_ICONQUESTION,
+        );
+        r == IDYES
     }
 }
 
-unsafe extern "system" fn hook(code: i32, w: usize, l: isize) -> isize {
-    if code >= 0 && w == 0x100 {
-        let k = &*(l as *const Kbd);
-        // 0x53 = S, flags & 0x10 = tecla injetada (ignora as nossas)
-        if k.vk_code == 0x53 && k.flags & 0x10 == 0 {
-            let win = tecla_pressionada(0x5B) || tecla_pressionada(0x5C);
-            let shift = tecla_pressionada(0x10);
-            if win && shift {
-                // tecla fantasma para o menu Iniciar nao abrir ao soltar o Win
-                keybd_event(0xE8, 0, 0, 0);
-                keybd_event(0xE8, 0, 2, 0);
-                thread::spawn(capturar);
-                return 1;
-            }
-        }
+/// Mostra uma caixa só com OK (informação ou erro).
+fn avisar(titulo: &str, texto: &str, erro: bool) {
+    let t = para_wide(texto);
+    let tit = para_wide(titulo);
+    let icone = if erro { MB_ICONERROR } else { MB_ICONINFORMATION };
+    unsafe {
+        MessageBoxW(std::ptr::null_mut(), t.as_ptr(), tit.as_ptr(), icone);
     }
-    CallNextHookEx(null_mut(), code, w, l)
+}
+
+// ---------- helpers de sistema ----------
+
+fn rodar(cmd: &str, args: &[&str]) -> bool {
+    match Command::new(cmd).args(args).output() {
+        Ok(o) => o.status.success(),
+        Err(_) => false,
+    }
+}
+
+// ---------- programa ----------
+
+fn executar() -> Result<(), String> {
+    let exe_atual = env::current_exe().map_err(|e| format!("Nao consegui achar meu proprio caminho: {}", e))?;
+    let pasta_atual = exe_atual.parent().ok_or("Nao consegui achar a pasta do programa")?;
+    let origem_atalho = pasta_atual.join("atalho-captura.exe");
+    let origem_nativo = pasta_atual.join("ScreenClippingHost.exe");
+
+    if !origem_atalho.exists() {
+        return Err(
+            "Nao achei \"atalho-captura.exe\" na mesma pasta deste programa.\n\
+             Coloque os dois arquivos juntos e rode de novo."
+                .into(),
+        );
+    }
+
+    if !origem_nativo.exists() {
+        return Err(
+            "Nao achei \"ScreenClippingHost.exe\" na mesma pasta deste programa.\n\
+             Coloque o arquivo junto com o atalho-captura.exe e rode de novo."
+                .into(),
+        );
+    }
+
+    // confirmação antes de mexer no sistema
+    if !perguntar(
+        "Configurar atalho de captura",
+        "Isso vai:\n\n\
+         1) Apagar o ScreenClippingHost.exe original do Windows;\n\
+         2) Colocar o ScreenClippingHost.exe desta pasta no lugar dele;\n\
+         3) Copiar o atalho-captura.exe para C:\\Programas;\n\
+         4) Criar uma tarefa agendada com privilégio máximo.\n\n\
+         Deseja continuar?",
+    ) {
+        avisar("Cancelado", "Nada foi alterado.", false);
+        return Ok(());
+    }
+
+    fs::create_dir_all(DESTINO_DIR)
+        .map_err(|e| format!("Nao consegui criar {}: {}", DESTINO_DIR, e))?;
+
+    // 1. apagar o nativo original
+    if Path::new(NATIVO).exists() {
+        rodar("takeown", &["/f", NATIVO]);
+        rodar("icacls", &[NATIVO, "/grant", "administradores:F"]);
+
+        fs::remove_file(NATIVO).map_err(|e| {
+            format!(
+                "Nao consegui apagar o ScreenClippingHost original:\n{}\n\
+                 (talvez esteja em uso — feche o aplicativo de captura e tente de novo)",
+                e
+            )
+        })?;
+    }
+
+    // 2. mover o nosso ScreenClippingHost.exe para o local original
+    fs::rename(&origem_nativo, NATIVO)
+        .map_err(|e| format!("Erro ao mover o ScreenClippingHost.exe: {}", e))?;
+
+    // 3. copiar o atalho-captura e criar tarefa agendada
+    let destino_exe = Path::new(DESTINO_DIR).join("atalho-captura.exe");
+    fs::copy(&origem_atalho, &destino_exe)
+        .map_err(|e| format!("Erro ao copiar o atalho-captura.exe: {}", e))?;
+
+    rodar("schtasks", &["/delete", "/tn", "AtalhoCaptura", "/f"]);
+    let caminho_arg = format!("\"{}\"", destino_exe.display());
+    let ok = rodar(
+        "schtasks",
+        &[
+            "/create", "/tn", "AtalhoCaptura", "/tr", &caminho_arg, "/sc", "onlogon", "/rl",
+            "highest", "/f",
+        ],
+    );
+
+    if ok {
+        avisar(
+            "Concluído",
+            "Pronto!\n\nReinicie o PC e teste o Win+Shift+S.",
+            false,
+        );
+        Ok(())
+    } else {
+        Err("Nao consegui criar a tarefa agendada.\nRode este programa como administrador.".into())
+    }
 }
 
 fn main() {
-    unsafe {
-        // impede abrir duas copias
-        let nome = wide("Local\\AtalhoCapturaRust");
-        CreateMutexW(null_mut(), 0, nome.as_ptr());
-        if GetLastError() == 183 {
-            return;
-        }
-
-        SetWindowsHookExW(13, hook, GetModuleHandleW(std::ptr::null()), 0);
-        let mut m: Msg = zeroed();
-        while GetMessageW(&mut m, null_mut(), 0, 0) > 0 {}
+    if let Err(msg) = executar() {
+        avisar("Erro", &msg, true);
     }
 }
