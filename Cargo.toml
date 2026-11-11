@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 rfd = "0.15"
+winreg = "0.52"
 
 [build-dependencies]
 winres = "0.1"
