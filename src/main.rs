@@ -52,12 +52,19 @@ fn instalar_screen_clipping() {
         return;
     }
 
+    // Se já existe .backup, ele guarda o ORIGINAL do Windows: nunca mexer nele.
+    let backup_ja_existe = backup.exists();
+
+    let passo1 = if backup_ja_existe {
+        format!("1. Backup já existe, será mantido:\n   {}.backup (não será alterado)", EXE_NAME)
+    } else {
+        format!("1. Renomear original:\n   {} → {}.backup", target.display(), EXE_NAME)
+    };
+
     let msg = format!(
-        "As seguintes operações serão realizadas:\n\n\
-        1. Renomear original:\n   {} → {}.backup\n\n\
+        "As seguintes operações serão realizadas:\n\n{}\n\n\
         2. Copiar substituto:\n   {} → {}\n\nDeseja continuar?",
-        target.display(), EXE_NAME,
-        source.display(), target.display()
+        passo1, source.display(), target.display()
     );
 
     let r = MessageDialog::new()
@@ -68,18 +75,35 @@ fn instalar_screen_clipping() {
         .show();
 
     if let MessageDialogResult::Yes = r {
+        let mut fez_backup_agora = false;
+
         if target.exists() {
-            if let Err(e) = std::fs::rename(&target, &backup) {
-                show_error(&format!("Erro ao renomear o original:\n{}\n\nTente rodar como Administrador.", e));
-                return;
+            if backup_ja_existe {
+                // O arquivo atual é um substituto antigo: pode apagar, o original está no .backup
+                if let Err(e) = std::fs::remove_file(&target) {
+                    show_error(&format!("Erro ao remover o arquivo atual:\n{}\n\nTente rodar como Administrador.", e));
+                    return;
+                }
+            } else {
+                if let Err(e) = std::fs::rename(&target, &backup) {
+                    show_error(&format!("Erro ao renomear o original:\n{}\n\nTente rodar como Administrador.", e));
+                    return;
+                }
+                fez_backup_agora = true;
             }
         }
+
         if let Err(e) = std::fs::copy(&source, &target) {
-            let _ = std::fs::rename(&backup, &target);
+            // Desfaz: devolve o original pro lugar
+            if fez_backup_agora {
+                let _ = std::fs::rename(&backup, &target);
+            } else if backup_ja_existe {
+                let _ = std::fs::copy(&backup, &target);
+            }
             show_error(&format!("Erro ao copiar o substituto:\n{}", e));
             return;
         }
-        show_ok("Substituição feita com sucesso!\nOriginal salvo como .backup.");
+        show_ok("Substituição feita com sucesso!\nO original está guardado como .backup.");
     }
 }
 
@@ -143,6 +167,16 @@ fn gravar_replace_van(valor: u32) -> Result<(), String> {
     }
 }
 
+fn reiniciar_explorer() {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let _ = std::process::Command::new("taskkill")
+        .args(["/f", "/im", "explorer.exe"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status();
+    let _ = std::process::Command::new("explorer.exe").spawn();
+}
+
 fn ativar_rede_classica() {
     let r = MessageDialog::new()
         .set_level(MessageLevel::Warning)
@@ -159,8 +193,29 @@ fn ativar_rede_classica() {
 
     if let MessageDialogResult::Yes = r {
         match gravar_replace_van(2) {
-            Ok(())  => show_ok("Painel de rede clássico ativado!\n\nReinicie o Windows para aplicar."),
-            Err(e)  => show_error(&format!("Erro ao modificar o Registro:\n{}", e)),
+            Ok(()) => {
+                // Lê de volta pra confirmar que gravou mesmo
+                let lido: Result<u32, _> = RegKey::predef(HKEY_LOCAL_MACHINE)
+                    .open_subkey(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Control Panel\Settings\Network")
+                    .and_then(|k| k.get_value("ReplaceVan"));
+                let confere = match lido {
+                    Ok(v) => format!("Valor no Registro agora: ReplaceVan = {}", v),
+                    Err(e) => format!("Atenção: não consegui ler o valor de volta ({})", e),
+                };
+                let rr = MessageDialog::new()
+                    .set_level(MessageLevel::Info)
+                    .set_title("Concluído")
+                    .set_description(&format!(
+                        "Gravado!\n{}\n\nQuer reiniciar o Explorer agora pra aplicar?\n(a tela pisca rapidinho)",
+                        confere
+                    ))
+                    .set_buttons(MessageButtons::YesNo)
+                    .show();
+                if let MessageDialogResult::Yes = rr {
+                    reiniciar_explorer();
+                }
+            }
+            Err(e) => show_error(&format!("Erro ao modificar o Registro:\n{}", e)),
         }
     }
 }
