@@ -21,6 +21,7 @@ use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken}
 const SYS_DIR: &str = r"C:\Windows\SystemApps\MicrosoftWindows.Client.CBS_cw5n1h2txyewy";
 const EXE_NAME: &str = "ScreenClippingHost.exe";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const TAREFA: &str = "ScreenFix_ScreenClippingHost";
 
 // ---------------------------------------------------------------- Registro
 
@@ -145,6 +146,50 @@ fn aplicar_screen_clipping() -> Result<String, String> {
     Ok("substituído (original guardado como .backup)".into())
 }
 
+/// Cria uma tarefa agendada que abre o ScreenClippingHost.exe a cada login,
+/// com privilégios mais altos (administrador) e sem as travas de bateria padrão do schtasks.
+fn criar_tarefa_agendada() -> Result<String, String> {
+    let exe = Path::new(SYS_DIR).join(EXE_NAME);
+    if !exe.exists() {
+        return Err(format!("não achei {}", exe.display()));
+    }
+
+    let script = format!(
+        "$ErrorActionPreference='Stop'; \
+        $u = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name; \
+        $a = New-ScheduledTaskAction -Execute '{exe}'; \
+        $t = New-ScheduledTaskTrigger -AtLogOn -User $u; \
+        $t.Delay = 'PT5S'; \
+        $p = New-ScheduledTaskPrincipal -UserId $u -LogonType Interactive -RunLevel Highest; \
+        $s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Seconds 0); \
+        Register-ScheduledTask -TaskName '{nome}' -Action $a -Trigger $t -Principal $p -Settings $s -Force | Out-Null",
+        exe = exe.display(),
+        nome = TAREFA
+    );
+
+    let o = Command::new("powershell")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| format!("não consegui rodar o PowerShell ({})", e))?;
+
+    if o.status.success() {
+        Ok("criada (abre no login, como administrador)".into())
+    } else {
+        let err = String::from_utf8_lossy(&o.stderr);
+        let linha = err.lines().map(|l| l.trim()).find(|l| !l.is_empty()).unwrap_or("erro desconhecido");
+        Err(linha.chars().take(110).collect())
+    }
+}
+
+/// Já inicia o ScreenClippingHost agora, sem precisar reiniciar o PC.
+fn iniciar_tarefa() {
+    let _ = Command::new("schtasks")
+        .args(["/Run", "/TN", TAREFA])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status();
+}
+
 fn windows_build() -> Result<u32, String> {
     let o = Command::new("powershell")
         .args(["-NoProfile", "-Command", "[Environment]::OSVersion.Version.Build"])
@@ -232,6 +277,7 @@ struct Resultado {
     volume: Result<String, String>,
     screen: Result<String, String>,
     captura: Result<String, String>,
+    tarefa: Result<String, String>,
 }
 
 fn executar() -> Resultado {
@@ -243,11 +289,21 @@ fn executar() -> Resultado {
     let volume = aplicar_volume_classico();
     let screen = aplicar_screen_clipping();
     let captura = remover_captura_esboco();
+    let tarefa = if screen.is_ok() {
+        criar_tarefa_agendada()
+    } else {
+        Ok("ignorado: a substituição do ScreenClippingHost não deu certo".into())
+    };
 
     // Sempre restaura o Explorer, mesmo se algo deu errado
     restaurar_explorer();
 
-    Resultado { rede, volume, screen, captura }
+    // Com o Explorer de volta, já abre o ScreenClippingHost
+    if screen.is_ok() && tarefa.is_ok() {
+        iniciar_tarefa();
+    }
+
+    Resultado { rede, volume, screen, captura, tarefa }
 }
 
 // ---------------------------------------------------------------- Interface
@@ -337,6 +393,7 @@ impl eframe::App for App {
                             .color(Color32::from_rgb(150, 155, 170)),
                     );
                     ui.label("•  Remover o app Captura e Esboço (só no Windows 10)");
+                    ui.label("•  Criar tarefa pra abrir o ScreenClippingHost no login (admin)");
                     ui.add_space(10.0);
                     ui.label(
                         RichText::new("O Explorer vai fechar durante o processo e voltar sozinho no final.")
@@ -366,6 +423,8 @@ impl eframe::App for App {
                     linha_resultado(ui, "ScreenClippingHost", &res.screen);
                     ui.add_space(4.0);
                     linha_resultado(ui, "Captura e Esboço", &res.captura);
+                    ui.add_space(4.0);
+                    linha_resultado(ui, "Tarefa agendada", &res.tarefa);
                     ui.add_space(10.0);
                     ui.label(
                         RichText::new("Explorer reaberto. Se o volume clássico não mudar, reinicie o computador.")
@@ -401,7 +460,7 @@ impl eframe::App for App {
 fn main() -> eframe::Result<()> {
     let opcoes = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([470.0, 375.0])
+            .with_inner_size([470.0, 415.0])
             .with_decorations(false)
             .with_always_on_top()
             .with_resizable(false),
