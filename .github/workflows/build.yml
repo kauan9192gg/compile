@@ -1,32 +1,18 @@
-name: Build
+name: Build Windows
 
 on:
   push:
-  pull_request:
   workflow_dispatch:
 
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            bin: sim_nao.exe
-            name: sim_nao-windows
-          - os: ubuntu-latest
-            bin: sim_nao
-            name: sim_nao-linux
-          - os: macos-latest
-            bin: sim_nao
-            name: sim_nao-macos
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build
+      - name: Build release
         run: cargo build --release
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.name }}
-          path: target/release/${{ matrix.bin }}
+          name: screen_fix
+          path: target/release/screen_fix.exe
