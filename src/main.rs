@@ -145,6 +145,51 @@ fn aplicar_screen_clipping() -> Result<String, String> {
     Ok("substituído (original guardado como .backup)".into())
 }
 
+fn windows_build() -> Result<u32, String> {
+    let o = Command::new("powershell")
+        .args(["-NoProfile", "-Command", "[Environment]::OSVersion.Version.Build"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| format!("não consegui rodar o PowerShell ({})", e))?;
+    String::from_utf8_lossy(&o.stdout)
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| "não consegui detectar a versão do Windows".to_string())
+}
+
+/// Remove o app "Captura e Esboço" (Microsoft.ScreenSketch), igual ao .bat antigo.
+/// No Windows 11 (build >= 22000) esse pacote é a própria Ferramenta de Captura,
+/// então não apaga nada.
+fn remover_captura_esboco() -> Result<String, String> {
+    let build = windows_build()?;
+    if build >= 22000 {
+        return Ok("ignorado: no Windows 11 esse app é a própria Ferramenta de Captura".into());
+    }
+
+    let script = "$ErrorActionPreference='Stop'; \
+        $p = Get-AppxPackage -AllUsers Microsoft.ScreenSketch; \
+        if (-not $p) { Write-Output 'NAOEXISTE'; exit 0 }; \
+        $p | Remove-AppxPackage -AllUsers";
+
+    let o = Command::new("powershell")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| format!("não consegui rodar o PowerShell ({})", e))?;
+
+    if o.status.success() {
+        if String::from_utf8_lossy(&o.stdout).contains("NAOEXISTE") {
+            Ok("já não estava instalado".into())
+        } else {
+            Ok("removido".into())
+        }
+    } else {
+        let err = String::from_utf8_lossy(&o.stderr);
+        let linha = err.lines().map(|l| l.trim()).find(|l| !l.is_empty()).unwrap_or("erro desconhecido");
+        Err(linha.chars().take(110).collect())
+    }
+}
+
 // ---------------------------------------------------------------- Explorer
 
 fn matar_processo(nome: &str) {
@@ -186,6 +231,7 @@ struct Resultado {
     rede: Result<String, String>,
     volume: Result<String, String>,
     screen: Result<String, String>,
+    captura: Result<String, String>,
 }
 
 fn executar() -> Resultado {
@@ -196,11 +242,12 @@ fn executar() -> Resultado {
     let rede = aplicar_rede_classica();
     let volume = aplicar_volume_classico();
     let screen = aplicar_screen_clipping();
+    let captura = remover_captura_esboco();
 
     // Sempre restaura o Explorer, mesmo se algo deu errado
     restaurar_explorer();
 
-    Resultado { rede, volume, screen }
+    Resultado { rede, volume, screen, captura }
 }
 
 // ---------------------------------------------------------------- Interface
@@ -224,6 +271,10 @@ struct App {
 
 fn linha_resultado(ui: &mut egui::Ui, nome: &str, r: &Result<String, String>) {
     ui.horizontal_wrapped(|ui| match r {
+        Ok(m) if m.starts_with("ignorado") => {
+            ui.label(RichText::new("PULADO").color(Color32::from_rgb(230, 190, 90)).strong());
+            ui.label(format!("{}: {}", nome, m));
+        }
         Ok(m) => {
             ui.label(RichText::new("OK").color(Color32::from_rgb(90, 200, 120)).strong());
             ui.label(format!("{}: {}", nome, m));
@@ -255,6 +306,10 @@ impl eframe::App for App {
         }
         if matches!(self.estado, Estado::Executando) {
             ctx.request_repaint_after(Duration::from_millis(100));
+            // Bloqueia Alt+F4 (e qualquer pedido de fechar) enquanto está aplicando
+            if ctx.input(|i| i.viewport().close_requested()) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            }
         }
 
         let moldura = egui::Frame::none()
@@ -281,6 +336,7 @@ impl eframe::App for App {
                             .size(12.0)
                             .color(Color32::from_rgb(150, 155, 170)),
                     );
+                    ui.label("•  Remover o app Captura e Esboço (só no Windows 10)");
                     ui.add_space(10.0);
                     ui.label(
                         RichText::new("O Explorer vai fechar durante o processo e voltar sozinho no final.")
@@ -308,6 +364,8 @@ impl eframe::App for App {
                     linha_resultado(ui, "Volume clássico", &res.volume);
                     ui.add_space(4.0);
                     linha_resultado(ui, "ScreenClippingHost", &res.screen);
+                    ui.add_space(4.0);
+                    linha_resultado(ui, "Captura e Esboço", &res.captura);
                     ui.add_space(10.0);
                     ui.label(
                         RichText::new("Explorer reaberto. Se o volume clássico não mudar, reinicie o computador.")
@@ -343,7 +401,7 @@ impl eframe::App for App {
 fn main() -> eframe::Result<()> {
     let opcoes = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([470.0, 330.0])
+            .with_inner_size([470.0, 375.0])
             .with_decorations(false)
             .with_always_on_top()
             .with_resizable(false),
