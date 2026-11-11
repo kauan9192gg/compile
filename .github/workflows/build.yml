@@ -1,0 +1,32 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            bin: sim_nao.exe
+            name: sim_nao-windows
+          - os: ubuntu-latest
+            bin: sim_nao
+            name: sim_nao-linux
+          - os: macos-latest
+            bin: sim_nao
+            name: sim_nao-macos
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: target/release/${{ matrix.bin }}
