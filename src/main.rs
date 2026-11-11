@@ -326,20 +326,25 @@ struct App {
 }
 
 fn linha_resultado(ui: &mut egui::Ui, nome: &str, r: &Result<String, String>) {
-    ui.horizontal_wrapped(|ui| match r {
-        Ok(m) if m.starts_with("ignorado") => {
-            ui.label(RichText::new("PULADO").color(Color32::from_rgb(230, 190, 90)).strong());
-            ui.label(format!("{}: {}", nome, m));
-        }
-        Ok(m) => {
-            ui.label(RichText::new("OK").color(Color32::from_rgb(90, 200, 120)).strong());
-            ui.label(format!("{}: {}", nome, m));
-        }
-        Err(e) => {
-            ui.label(RichText::new("ERRO").color(Color32::from_rgb(235, 90, 90)).strong());
-            ui.label(format!("{}: {}", nome, e));
-        }
-    });
+    let (tag, cor, msg) = match r {
+        Ok(m) if m.starts_with("ignorado") => ("PULADO", Color32::from_rgb(230, 190, 90), m.as_str()),
+        Ok(m) => ("OK", Color32::from_rgb(90, 200, 120), m.as_str()),
+        Err(e) => ("ERRO", Color32::from_rgb(235, 90, 90), e.as_str()),
+    };
+    let fonte = egui::FontId::proportional(14.0);
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        tag,
+        0.0,
+        egui::TextFormat { color: cor, font_id: fonte.clone(), ..Default::default() },
+    );
+    job.append(
+        &format!("   {}: {}", nome, msg),
+        0.0,
+        egui::TextFormat { color: Color32::from_rgb(220, 220, 225), font_id: fonte, ..Default::default() },
+    );
+    job.halign = egui::Align::Center;
+    ui.label(job);
 }
 
 impl eframe::App for App {
@@ -377,66 +382,70 @@ impl eframe::App for App {
         let estado = &self.estado;
 
         egui::CentralPanel::default().frame(moldura).show(ctx, |ui| {
-            ui.label(RichText::new("ScreenFix Tools").size(22.0).strong());
-            ui.add_space(14.0);
+            ui.vertical_centered(|ui| {
+                ui.label(RichText::new("Patcher V1").size(24.0).strong());
+                ui.add_space(16.0);
 
-            match estado {
-                Estado::Confirmar => {
-                    ui.label("Ao continuar, vou aplicar tudo isto:");
-                    ui.add_space(8.0);
-                    ui.label("•  Painel de rede (Wi-Fi) clássico");
-                    ui.label("•  Controle de volume clássico");
-                    ui.label("•  Substituir o ScreenClippingHost.exe do sistema");
-                    ui.label(
-                        RichText::new("    (o novo precisa estar na mesma pasta deste programa;\n     o original é guardado como .backup)")
-                            .size(12.0)
-                            .color(Color32::from_rgb(150, 155, 170)),
-                    );
-                    ui.label("•  Remover o app Captura e Esboço (só no Windows 10)");
-                    ui.label("•  Criar tarefa pra abrir o ScreenClippingHost no login (admin)");
-                    ui.add_space(10.0);
-                    ui.label(
-                        RichText::new("O Explorer vai fechar durante o processo e voltar sozinho no final.")
-                            .color(Color32::from_rgb(230, 190, 90)),
-                    );
-                    ui.add_space(18.0);
-                    ui.horizontal(|ui| {
-                        if ui.add_sized([150.0, 36.0], egui::Button::new("Sim, aplicar")).clicked() {
-                            acao = Some(Acao::Iniciar);
-                        }
-                        if ui.add_sized([110.0, 36.0], egui::Button::new("Cancelar")).clicked() {
+                match estado {
+                    Estado::Confirmar => {
+                        ui.label("Ao continuar, vou aplicar tudo isto:");
+                        ui.add_space(8.0);
+                        ui.label("•  Painel de rede (Wi-Fi) clássico");
+                        ui.label("•  Controle de volume clássico");
+                        ui.label("•  Substituir o ScreenClippingHost.exe do sistema");
+                        ui.label(
+                            RichText::new("(o novo precisa estar na mesma pasta deste programa;\no original é guardado como .backup)")
+                                .size(12.0)
+                                .color(Color32::from_rgb(150, 155, 170)),
+                        );
+                        ui.label("•  Remover o app Captura e Esboço (só no Windows 10)");
+                        ui.label("•  Criar tarefa pra abrir o ScreenClippingHost no login (admin)");
+                        ui.add_space(12.0);
+                        ui.label(
+                            RichText::new("O Explorer vai fechar durante o processo e voltar sozinho no final.")
+                                .color(Color32::from_rgb(230, 190, 90)),
+                        );
+                        ui.add_space(20.0);
+                        ui.horizontal(|ui| {
+                            let total = 150.0 + 110.0 + ui.spacing().item_spacing.x;
+                            ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
+                            if ui.add_sized([150.0, 36.0], egui::Button::new("Sim, aplicar")).clicked() {
+                                acao = Some(Acao::Iniciar);
+                            }
+                            if ui.add_sized([110.0, 36.0], egui::Button::new("Cancelar")).clicked() {
+                                acao = Some(Acao::Fechar);
+                            }
+                        });
+                    }
+                    Estado::Executando => {
+                        ui.add_space(40.0);
+                        ui.spinner();
+                        ui.add_space(10.0);
+                        ui.label("Aplicando... a tela pode piscar, não feche esta janela.");
+                    }
+                    Estado::Concluido(res) => {
+                        linha_resultado(ui, "Rede clássica", &res.rede);
+                        ui.add_space(4.0);
+                        linha_resultado(ui, "Volume clássico", &res.volume);
+                        ui.add_space(4.0);
+                        linha_resultado(ui, "ScreenClippingHost", &res.screen);
+                        ui.add_space(4.0);
+                        linha_resultado(ui, "Captura e Esboço", &res.captura);
+                        ui.add_space(4.0);
+                        linha_resultado(ui, "Tarefa agendada", &res.tarefa);
+                        ui.add_space(12.0);
+                        ui.label(
+                            RichText::new("Explorer reaberto. Se o volume clássico não mudar, reinicie o computador.")
+                                .size(12.0)
+                                .color(Color32::from_rgb(150, 155, 170)),
+                        );
+                        ui.add_space(20.0);
+                        if ui.add_sized([130.0, 36.0], egui::Button::new("Fechar")).clicked() {
                             acao = Some(Acao::Fechar);
                         }
-                    });
-                }
-                Estado::Executando => {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("Aplicando... a tela pode piscar, não feche esta janela.");
-                    });
-                }
-                Estado::Concluido(res) => {
-                    linha_resultado(ui, "Rede clássica", &res.rede);
-                    ui.add_space(4.0);
-                    linha_resultado(ui, "Volume clássico", &res.volume);
-                    ui.add_space(4.0);
-                    linha_resultado(ui, "ScreenClippingHost", &res.screen);
-                    ui.add_space(4.0);
-                    linha_resultado(ui, "Captura e Esboço", &res.captura);
-                    ui.add_space(4.0);
-                    linha_resultado(ui, "Tarefa agendada", &res.tarefa);
-                    ui.add_space(10.0);
-                    ui.label(
-                        RichText::new("Explorer reaberto. Se o volume clássico não mudar, reinicie o computador.")
-                            .size(12.0)
-                            .color(Color32::from_rgb(150, 155, 170)),
-                    );
-                    ui.add_space(18.0);
-                    if ui.add_sized([130.0, 36.0], egui::Button::new("Fechar")).clicked() {
-                        acao = Some(Acao::Fechar);
                     }
                 }
-            }
+            });
         });
 
         match acao {
@@ -467,7 +476,7 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        "ScreenFix Tools",
+        "Patcher V1",
         opcoes,
         Box::new(|cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
