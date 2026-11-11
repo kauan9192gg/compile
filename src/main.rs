@@ -219,6 +219,7 @@ enum Acao {
 struct App {
     estado: Estado,
     rx: Option<Receiver<Resultado>>,
+    centralizado: bool,
 }
 
 fn linha_resultado(ui: &mut egui::Ui, nome: &str, r: &Result<String, String>) {
@@ -236,6 +237,16 @@ fn linha_resultado(ui: &mut egui::Ui, nome: &str, r: &Result<String, String>) {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Centraliza a janela na tela (tenta até o tamanho do monitor estar disponível)
+        if !self.centralizado {
+            if let Some(cmd) = egui::ViewportCommand::center_on_screen(ctx) {
+                ctx.send_viewport_cmd(cmd);
+                self.centralizado = true;
+            } else {
+                ctx.request_repaint();
+            }
+        }
+
         if let Some(rx) = &self.rx {
             if let Ok(res) = rx.try_recv() {
                 self.estado = Estado::Concluido(res);
@@ -248,21 +259,13 @@ impl eframe::App for App {
 
         let moldura = egui::Frame::none()
             .fill(Color32::from_rgb(24, 26, 32))
-            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(70, 75, 90)))
+            .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(70, 75, 90)))
             .inner_margin(egui::Margin::same(22.0));
 
         let mut acao: Option<Acao> = None;
         let estado = &self.estado;
 
         egui::CentralPanel::default().frame(moldura).show(ctx, |ui| {
-            // Área de arrastar a janela (sem barra de título)
-            let topo = ui.max_rect();
-            let area = egui::Rect::from_min_size(topo.min, egui::vec2(topo.width(), 34.0));
-            let arrasto = ui.interact(area, egui::Id::new("arrastar"), egui::Sense::click_and_drag());
-            if arrasto.drag_started_by(egui::PointerButton::Primary) {
-                ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-            }
-
             ui.label(RichText::new("ScreenFix Tools").size(22.0).strong());
             ui.add_space(14.0);
 
@@ -351,7 +354,7 @@ fn main() -> eframe::Result<()> {
         opcoes,
         Box::new(|cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
-            Ok(Box::new(App { estado: Estado::Confirmar, rx: None }))
+            Ok(Box::new(App { estado: Estado::Confirmar, rx: None, centralizado: false }))
         }),
     )
 }
