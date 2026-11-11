@@ -2,8 +2,6 @@
 
 use std::path::Path;
 use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
-use winreg::enums::*;
-use winreg::RegKey;
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, LUID};
 use windows_sys::Win32::Security::{
     AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED,
@@ -18,94 +16,7 @@ use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken}
 const SYS_DIR: &str = r"C:\Windows\SystemApps\MicrosoftWindows.Client.CBS_cw5n1h2txyewy";
 const EXE_NAME: &str = "ScreenClippingHost.exe";
 
-fn show_error(msg: &str) {
-    MessageDialog::new()
-        .set_level(MessageLevel::Error)
-        .set_title("Erro")
-        .set_description(msg)
-        .show();
-}
-
-fn show_ok(msg: &str) {
-    MessageDialog::new()
-        .set_level(MessageLevel::Info)
-        .set_title("Concluído")
-        .set_description(msg)
-        .show();
-}
-
-fn instalar_screen_clipping() {
-    let target = Path::new(SYS_DIR).join(EXE_NAME);
-    let backup = Path::new(SYS_DIR).join(format!("{}.backup", EXE_NAME));
-
-    let current_exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => { show_error(&format!("Não foi possível obter o caminho deste exe:\n{}", e)); return; }
-    };
-    let source = current_exe.parent().unwrap().join(EXE_NAME);
-
-    if !source.exists() {
-        show_error(&format!(
-            "Arquivo substituto não encontrado.\n\nColoque o novo {} na mesma pasta deste programa:\n{}",
-            EXE_NAME, source.display()
-        ));
-        return;
-    }
-
-    // Se já existe .backup, ele guarda o ORIGINAL do Windows: nunca mexer nele.
-    let backup_ja_existe = backup.exists();
-
-    let passo1 = if backup_ja_existe {
-        format!("1. Backup já existe, será mantido:\n   {}.backup (não será alterado)", EXE_NAME)
-    } else {
-        format!("1. Renomear original:\n   {} → {}.backup", target.display(), EXE_NAME)
-    };
-
-    let msg = format!(
-        "As seguintes operações serão realizadas:\n\n{}\n\n\
-        2. Copiar substituto:\n   {} → {}\n\nDeseja continuar?",
-        passo1, source.display(), target.display()
-    );
-
-    let r = MessageDialog::new()
-        .set_level(MessageLevel::Warning)
-        .set_title("Substituir ScreenClippingHost.exe")
-        .set_description(&msg)
-        .set_buttons(MessageButtons::YesNo)
-        .show();
-
-    if let MessageDialogResult::Yes = r {
-        let mut fez_backup_agora = false;
-
-        if target.exists() {
-            if backup_ja_existe {
-                // O arquivo atual é um substituto antigo: pode apagar, o original está no .backup
-                if let Err(e) = std::fs::remove_file(&target) {
-                    show_error(&format!("Erro ao remover o arquivo atual:\n{}\n\nTente rodar como Administrador.", e));
-                    return;
-                }
-            } else {
-                if let Err(e) = std::fs::rename(&target, &backup) {
-                    show_error(&format!("Erro ao renomear o original:\n{}\n\nTente rodar como Administrador.", e));
-                    return;
-                }
-                fez_backup_agora = true;
-            }
-        }
-
-        if let Err(e) = std::fs::copy(&source, &target) {
-            // Desfaz: devolve o original pro lugar
-            if fez_backup_agora {
-                let _ = std::fs::rename(&backup, &target);
-            } else if backup_ja_existe {
-                let _ = std::fs::copy(&backup, &target);
-            }
-            show_error(&format!("Erro ao copiar o substituto:\n{}", e));
-            return;
-        }
-        show_ok("Substituição feita com sucesso!\nO original está guardado como .backup.");
-    }
-}
+// ---------------------------------------------------------------- Registro
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -133,18 +44,18 @@ unsafe fn ativar_privilegio(nome: &str) -> bool {
     ok
 }
 
-/// Grava HKLM\...\Control Panel\Settings\Network\ReplaceVan ignorando o dono (TrustedInstaller),
+/// Grava um DWORD em HKLM\<caminho>\<nome> ignorando o dono da chave (TrustedInstaller),
 /// usando os privilégios de Backup/Restauração do administrador.
-fn gravar_replace_van(valor: u32) -> Result<(), String> {
+fn gravar_dword(caminho: &str, nome: &str, valor: u32) -> Result<(), String> {
     unsafe {
         if !(ativar_privilegio("SeBackupPrivilege") && ativar_privilegio("SeRestorePrivilege")) {
-            return Err("Não consegui ativar os privilégios de Backup/Restauração.\nRode o programa como Administrador.".into());
+            return Err("não consegui ativar os privilégios de Backup/Restauração (rode como Administrador)".into());
         }
-        let caminho = wide(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Control Panel\Settings\Network");
+        let caminho_w = wide(caminho);
         let mut hkey: HKEY = 0;
         let rc = RegCreateKeyExW(
             HKEY_LOCAL_MACHINE,
-            caminho.as_ptr(),
+            caminho_w.as_ptr(),
             0,
             std::ptr::null(),
             REG_OPTION_BACKUP_RESTORE,
@@ -154,17 +65,82 @@ fn gravar_replace_van(valor: u32) -> Result<(), String> {
             std::ptr::null_mut(),
         );
         if rc != 0 {
-            return Err(format!("Não consegui abrir a chave (erro {}).", rc));
+            return Err(format!("não consegui abrir a chave (erro {})", rc));
         }
-        let nome = wide("ReplaceVan");
+        let nome_w = wide(nome);
         let dados = valor.to_le_bytes();
-        let rc = RegSetValueExW(hkey, nome.as_ptr(), 0, REG_DWORD, dados.as_ptr(), 4);
+        let rc = RegSetValueExW(hkey, nome_w.as_ptr(), 0, REG_DWORD, dados.as_ptr(), 4);
         RegCloseKey(hkey);
         if rc != 0 {
-            return Err(format!("Não consegui gravar o valor (erro {}).", rc));
+            return Err(format!("não consegui gravar o valor (erro {})", rc));
         }
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------- Ajustes
+
+fn aplicar_rede_classica() -> Result<String, String> {
+    gravar_dword(
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Control Panel\Settings\Network",
+        "ReplaceVan",
+        2,
+    )?;
+    Ok("ativado".into())
+}
+
+fn aplicar_volume_classico() -> Result<String, String> {
+    gravar_dword(
+        r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\MTCUVC",
+        "EnableMtcUvc",
+        0,
+    )?;
+    Ok("ativado".into())
+}
+
+fn aplicar_screen_clipping() -> Result<String, String> {
+    let target = Path::new(SYS_DIR).join(EXE_NAME);
+    let backup = Path::new(SYS_DIR).join(format!("{}.backup", EXE_NAME));
+
+    let current_exe = std::env::current_exe()
+        .map_err(|e| format!("não consegui achar a pasta deste programa ({})", e))?;
+    let source = current_exe.parent().unwrap().join(EXE_NAME);
+
+    if !source.exists() {
+        return Err(format!(
+            "não achei o {} novo na mesma pasta deste programa ({})",
+            EXE_NAME,
+            source.display()
+        ));
+    }
+
+    // Se já existe .backup, ele guarda o ORIGINAL do Windows: nunca mexer nele.
+    let backup_ja_existe = backup.exists();
+    let mut fez_backup_agora = false;
+
+    if target.exists() {
+        if backup_ja_existe {
+            // O arquivo atual é um substituto antigo: pode apagar, o original está no .backup
+            std::fs::remove_file(&target)
+                .map_err(|e| format!("erro ao remover o arquivo atual ({})", e))?;
+        } else {
+            std::fs::rename(&target, &backup)
+                .map_err(|e| format!("erro ao renomear o original ({})", e))?;
+            fez_backup_agora = true;
+        }
+    }
+
+    if let Err(e) = std::fs::copy(&source, &target) {
+        // Desfaz: devolve o original pro lugar
+        if fez_backup_agora {
+            let _ = std::fs::rename(&backup, &target);
+        } else if backup_ja_existe {
+            let _ = std::fs::copy(&backup, &target);
+        }
+        return Err(format!("erro ao copiar o substituto ({})", e));
+    }
+
+    Ok("substituído (original guardado como .backup)".into())
 }
 
 fn reiniciar_explorer() {
@@ -177,117 +153,64 @@ fn reiniciar_explorer() {
     let _ = std::process::Command::new("explorer.exe").spawn();
 }
 
-fn ativar_rede_classica() {
-    let r = MessageDialog::new()
-        .set_level(MessageLevel::Warning)
-        .set_title("Ativar painel de rede clássico")
-        .set_description(
-            "Ativa o painel de Wi-Fi estilo antigo (Windows 7/8),\n\
-            onde a lista de redes abre numa janelinha em vez do app Configurações.\n\n\
-            Vai gravar ReplaceVan = 2 no Registro.\n\
-            Reinicie o computador depois para aplicar.\n\n\
-            Deseja continuar?"
-        )
-        .set_buttons(MessageButtons::YesNo)
-        .show();
-
-    if let MessageDialogResult::Yes = r {
-        match gravar_replace_van(2) {
-            Ok(()) => {
-                // Lê de volta pra confirmar que gravou mesmo
-                let lido: Result<u32, _> = RegKey::predef(HKEY_LOCAL_MACHINE)
-                    .open_subkey(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Control Panel\Settings\Network")
-                    .and_then(|k| k.get_value("ReplaceVan"));
-                let confere = match lido {
-                    Ok(v) => format!("Valor no Registro agora: ReplaceVan = {}", v),
-                    Err(e) => format!("Atenção: não consegui ler o valor de volta ({})", e),
-                };
-                let rr = MessageDialog::new()
-                    .set_level(MessageLevel::Info)
-                    .set_title("Concluído")
-                    .set_description(&format!(
-                        "Gravado!\n{}\n\nQuer reiniciar o Explorer agora pra aplicar?\n(a tela pisca rapidinho)",
-                        confere
-                    ))
-                    .set_buttons(MessageButtons::YesNo)
-                    .show();
-                if let MessageDialogResult::Yes = rr {
-                    reiniciar_explorer();
-                }
-            }
-            Err(e) => show_error(&format!("Erro ao modificar o Registro:\n{}", e)),
-        }
-    }
-}
-
-fn ativar_volume_classico() {
-    let r = MessageDialog::new()
-        .set_level(MessageLevel::Warning)
-        .set_title("Ativar controle de volume clássico")
-        .set_description(
-            "Ativa o controle de volume estilo antigo (Windows 7/8),\n\
-            o slider pequenininho que aparecia do lado do relógio\n\
-            em vez do painel moderno do Windows 10/11.\n\n\
-            Reinicie o computador depois para aplicar.\n\n\
-            Deseja continuar?"
-        )
-        .set_buttons(MessageButtons::YesNo)
-        .show();
-
-    if let MessageDialogResult::Yes = r {
-        let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-        match hklm.create_subkey(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\MTCUVC") {
-            Ok((key, _)) => {
-                match key.set_value("EnableMtcUvc", &0u32) {
-                    Ok(_)  => show_ok("Controle de volume clássico ativado!\n\nReinicie o Windows para aplicar."),
-                    Err(e) => show_error(&format!("Erro ao definir o valor no Registro:\n{}", e)),
-                }
-            }
-            Err(e) => show_error(&format!("Erro ao modificar o Registro:\n{}\n\nTente rodar como Administrador.", e)),
-        }
-    }
-}
+// ---------------------------------------------------------------- Programa
 
 fn main() {
-    // Menu principal: ScreenClipping vs Tweaks do sistema
-    let escolha = MessageDialog::new()
+    let r = MessageDialog::new()
         .set_level(MessageLevel::Info)
         .set_title("ScreenFix Tools")
         .set_description(
-            "O que deseja fazer?\n\n\
-            ◀ ScreenClippingHost → substitui o exe do sistema\n\
-            ▶ Tweaks do Sistema  → rede clássica, volume clássico..."
+            "Ao continuar, este programa vai aplicar tudo isto:\n\n\
+            • Painel de rede (Wi-Fi) clássico\n\
+            • Controle de volume clássico\n\
+            • Substituir o ScreenClippingHost.exe do sistema\n\
+            \u{00A0}\u{00A0}(o novo precisa estar na mesma pasta deste programa;\n\
+            \u{00A0}\u{00A0}o original é guardado como .backup)\n\n\
+            Deseja continuar?",
         )
-        .set_buttons(MessageButtons::OkCancelCustom(
-            "ScreenClippingHost".into(),
-            "Tweaks do Sistema".into(),
-        ))
+        .set_buttons(MessageButtons::YesNo)
         .show();
 
-    match escolha {
-        MessageDialogResult::Ok => instalar_screen_clipping(),
-        MessageDialogResult::Cancel => {
-            // Submenu de tweaks
-            let tweak = MessageDialog::new()
-                .set_level(MessageLevel::Info)
-                .set_title("Tweaks do Sistema")
-                .set_description(
-                    "Qual tweak deseja aplicar?\n\n\
-                    ◀ Rede Clássica   → painel de Wi-Fi estilo Windows 7/8\n\
-                    ▶ Volume Clássico → slider de volume estilo Windows 7/8"
-                )
-                .set_buttons(MessageButtons::OkCancelCustom(
-                    "Rede Clássica".into(),
-                    "Volume Clássico".into(),
-                ))
-                .show();
+    if !matches!(r, MessageDialogResult::Yes) {
+        return;
+    }
 
-            match tweak {
-                MessageDialogResult::Ok     => ativar_rede_classica(),
-                MessageDialogResult::Cancel => ativar_volume_classico(),
-                _ => {}
-            }
+    let rede = aplicar_rede_classica();
+    let volume = aplicar_volume_classico();
+    let screen = aplicar_screen_clipping();
+
+    let linha = |nome: &str, res: &Result<String, String>| match res {
+        Ok(m) => format!("✔ {}: {}", nome, m),
+        Err(e) => format!("✘ {}: {}", nome, e),
+    };
+
+    let resumo = format!(
+        "{}\n{}\n{}",
+        linha("Rede clássica", &rede),
+        linha("Volume clássico", &volume),
+        linha("ScreenClippingHost", &screen),
+    );
+
+    let tudo_ok = rede.is_ok() && volume.is_ok() && screen.is_ok();
+    MessageDialog::new()
+        .set_level(if tudo_ok { MessageLevel::Info } else { MessageLevel::Warning })
+        .set_title("Concluído")
+        .set_description(&resumo)
+        .show();
+
+    if rede.is_ok() || volume.is_ok() {
+        let rr = MessageDialog::new()
+            .set_level(MessageLevel::Info)
+            .set_title("Aplicar agora?")
+            .set_description(
+                "Quer reiniciar o Explorer agora pra aplicar?\n\
+                (a tela pisca rapidinho)\n\n\
+                Se o volume clássico não mudar, reinicie o computador.",
+            )
+            .set_buttons(MessageButtons::YesNo)
+            .show();
+        if matches!(rr, MessageDialogResult::Yes) {
+            reiniciar_explorer();
         }
-        _ => {}
     }
 }
