@@ -1,7 +1,12 @@
 #![windows_subsystem = "windows"]
 
+use std::os::windows::process::CommandExt;
 use std::path::Path;
-use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
+use std::process::Command;
+use std::sync::mpsc::{channel, Receiver};
+use std::time::Duration;
+
+use eframe::egui::{self, Color32, RichText};
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, LUID};
 use windows_sys::Win32::Security::{
     AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED,
@@ -15,6 +20,7 @@ use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken}
 
 const SYS_DIR: &str = r"C:\Windows\SystemApps\MicrosoftWindows.Client.CBS_cw5n1h2txyewy";
 const EXE_NAME: &str = "ScreenClippingHost.exe";
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 // ---------------------------------------------------------------- Registro
 
@@ -103,15 +109,11 @@ fn aplicar_screen_clipping() -> Result<String, String> {
     let backup = Path::new(SYS_DIR).join(format!("{}.backup", EXE_NAME));
 
     let current_exe = std::env::current_exe()
-        .map_err(|e| format!("não consegui achar a pasta deste programa ({})", e))?;
+        .map_err(|e| format!("não consegui achar a pasta do programa ({})", e))?;
     let source = current_exe.parent().unwrap().join(EXE_NAME);
 
     if !source.exists() {
-        return Err(format!(
-            "não achei o {} novo na mesma pasta deste programa ({})",
-            EXE_NAME,
-            source.display()
-        ));
+        return Err(format!("não achei o {} novo na mesma pasta do programa", EXE_NAME));
     }
 
     // Se já existe .backup, ele guarda o ORIGINAL do Windows: nunca mexer nele.
@@ -143,74 +145,213 @@ fn aplicar_screen_clipping() -> Result<String, String> {
     Ok("substituído (original guardado como .backup)".into())
 }
 
-fn reiniciar_explorer() {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let _ = std::process::Command::new("taskkill")
-        .args(["/f", "/im", "explorer.exe"])
+// ---------------------------------------------------------------- Explorer
+
+fn matar_processo(nome: &str) {
+    let _ = Command::new("taskkill")
+        .args(["/f", "/im", nome])
         .creation_flags(CREATE_NO_WINDOW)
         .status();
-    let _ = std::process::Command::new("explorer.exe").spawn();
 }
 
-// ---------------------------------------------------------------- Programa
+fn explorer_rodando() -> bool {
+    Command::new("tasklist")
+        .args(["/FI", "IMAGENAME eq explorer.exe", "/NH"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_lowercase().contains("explorer.exe"))
+        .unwrap_or(false)
+}
 
-fn main() {
-    let r = MessageDialog::new()
-        .set_level(MessageLevel::Info)
-        .set_title("ScreenFix Tools")
-        .set_description(
-            "Ao continuar, este programa vai aplicar tudo isto:\n\n\
-            • Painel de rede (Wi-Fi) clássico\n\
-            • Controle de volume clássico\n\
-            • Substituir o ScreenClippingHost.exe do sistema\n\
-            \u{00A0}\u{00A0}(o novo precisa estar na mesma pasta deste programa;\n\
-            \u{00A0}\u{00A0}o original é guardado como .backup)\n\n\
-            Deseja continuar?",
-        )
-        .set_buttons(MessageButtons::YesNo)
-        .show();
-
-    if !matches!(r, MessageDialogResult::Yes) {
-        return;
+/// Reabre o Explorer DEPOIS das alterações. O Windows costuma reabrir sozinho depois
+/// de um taskkill; se ele já voltou no meio do processo, fecha de novo pra ele
+/// subir já com os ajustes. Se não voltar sozinho, abre manualmente.
+fn restaurar_explorer() {
+    if explorer_rodando() {
+        matar_processo("explorer.exe");
+        std::thread::sleep(Duration::from_millis(800));
     }
+    for _ in 0..10 {
+        if explorer_rodando() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    let _ = Command::new("explorer.exe").spawn();
+}
+
+// ---------------------------------------------------------------- Execução
+
+struct Resultado {
+    rede: Result<String, String>,
+    volume: Result<String, String>,
+    screen: Result<String, String>,
+}
+
+fn executar() -> Resultado {
+    matar_processo("explorer.exe");
+    matar_processo(EXE_NAME);
+    std::thread::sleep(Duration::from_millis(600));
 
     let rede = aplicar_rede_classica();
     let volume = aplicar_volume_classico();
     let screen = aplicar_screen_clipping();
 
-    let linha = |nome: &str, res: &Result<String, String>| match res {
-        Ok(m) => format!("✔ {}: {}", nome, m),
-        Err(e) => format!("✘ {}: {}", nome, e),
-    };
+    // Sempre restaura o Explorer, mesmo se algo deu errado
+    restaurar_explorer();
 
-    let resumo = format!(
-        "{}\n{}\n{}",
-        linha("Rede clássica", &rede),
-        linha("Volume clássico", &volume),
-        linha("ScreenClippingHost", &screen),
-    );
+    Resultado { rede, volume, screen }
+}
 
-    let tudo_ok = rede.is_ok() && volume.is_ok() && screen.is_ok();
-    MessageDialog::new()
-        .set_level(if tudo_ok { MessageLevel::Info } else { MessageLevel::Warning })
-        .set_title("Concluído")
-        .set_description(&resumo)
-        .show();
+// ---------------------------------------------------------------- Interface
 
-    if rede.is_ok() || volume.is_ok() {
-        let rr = MessageDialog::new()
-            .set_level(MessageLevel::Info)
-            .set_title("Aplicar agora?")
-            .set_description(
-                "Quer reiniciar o Explorer agora pra aplicar?\n\
-                (a tela pisca rapidinho)\n\n\
-                Se o volume clássico não mudar, reinicie o computador.",
-            )
-            .set_buttons(MessageButtons::YesNo)
-            .show();
-        if matches!(rr, MessageDialogResult::Yes) {
-            reiniciar_explorer();
+enum Estado {
+    Confirmar,
+    Executando,
+    Concluido(Resultado),
+}
+
+enum Acao {
+    Iniciar,
+    Fechar,
+}
+
+struct App {
+    estado: Estado,
+    rx: Option<Receiver<Resultado>>,
+}
+
+fn linha_resultado(ui: &mut egui::Ui, nome: &str, r: &Result<String, String>) {
+    ui.horizontal_wrapped(|ui| match r {
+        Ok(m) => {
+            ui.label(RichText::new("OK").color(Color32::from_rgb(90, 200, 120)).strong());
+            ui.label(format!("{}: {}", nome, m));
+        }
+        Err(e) => {
+            ui.label(RichText::new("ERRO").color(Color32::from_rgb(235, 90, 90)).strong());
+            ui.label(format!("{}: {}", nome, e));
+        }
+    });
+}
+
+impl eframe::App for App {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if let Some(rx) = &self.rx {
+            if let Ok(res) = rx.try_recv() {
+                self.estado = Estado::Concluido(res);
+                self.rx = None;
+            }
+        }
+        if matches!(self.estado, Estado::Executando) {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+
+        let moldura = egui::Frame::none()
+            .fill(Color32::from_rgb(24, 26, 32))
+            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(70, 75, 90)))
+            .inner_margin(egui::Margin::same(22.0));
+
+        let mut acao: Option<Acao> = None;
+        let estado = &self.estado;
+
+        egui::CentralPanel::default().frame(moldura).show(ctx, |ui| {
+            // Área de arrastar a janela (sem barra de título)
+            let topo = ui.max_rect();
+            let area = egui::Rect::from_min_size(topo.min, egui::vec2(topo.width(), 34.0));
+            let arrasto = ui.interact(area, egui::Id::new("arrastar"), egui::Sense::click_and_drag());
+            if arrasto.drag_started_by(egui::PointerButton::Primary) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
+
+            ui.label(RichText::new("ScreenFix Tools").size(22.0).strong());
+            ui.add_space(14.0);
+
+            match estado {
+                Estado::Confirmar => {
+                    ui.label("Ao continuar, vou aplicar tudo isto:");
+                    ui.add_space(8.0);
+                    ui.label("•  Painel de rede (Wi-Fi) clássico");
+                    ui.label("•  Controle de volume clássico");
+                    ui.label("•  Substituir o ScreenClippingHost.exe do sistema");
+                    ui.label(
+                        RichText::new("    (o novo precisa estar na mesma pasta deste programa;\n     o original é guardado como .backup)")
+                            .size(12.0)
+                            .color(Color32::from_rgb(150, 155, 170)),
+                    );
+                    ui.add_space(10.0);
+                    ui.label(
+                        RichText::new("O Explorer vai fechar durante o processo e voltar sozinho no final.")
+                            .color(Color32::from_rgb(230, 190, 90)),
+                    );
+                    ui.add_space(18.0);
+                    ui.horizontal(|ui| {
+                        if ui.add_sized([150.0, 36.0], egui::Button::new("Sim, aplicar")).clicked() {
+                            acao = Some(Acao::Iniciar);
+                        }
+                        if ui.add_sized([110.0, 36.0], egui::Button::new("Cancelar")).clicked() {
+                            acao = Some(Acao::Fechar);
+                        }
+                    });
+                }
+                Estado::Executando => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Aplicando... a tela pode piscar, não feche esta janela.");
+                    });
+                }
+                Estado::Concluido(res) => {
+                    linha_resultado(ui, "Rede clássica", &res.rede);
+                    ui.add_space(4.0);
+                    linha_resultado(ui, "Volume clássico", &res.volume);
+                    ui.add_space(4.0);
+                    linha_resultado(ui, "ScreenClippingHost", &res.screen);
+                    ui.add_space(10.0);
+                    ui.label(
+                        RichText::new("Explorer reaberto. Se o volume clássico não mudar, reinicie o computador.")
+                            .size(12.0)
+                            .color(Color32::from_rgb(150, 155, 170)),
+                    );
+                    ui.add_space(18.0);
+                    if ui.add_sized([130.0, 36.0], egui::Button::new("Fechar")).clicked() {
+                        acao = Some(Acao::Fechar);
+                    }
+                }
+            }
+        });
+
+        match acao {
+            Some(Acao::Iniciar) => {
+                let (tx, rx) = channel();
+                let ctx2 = ctx.clone();
+                std::thread::spawn(move || {
+                    let r = executar();
+                    let _ = tx.send(r);
+                    ctx2.request_repaint();
+                });
+                self.rx = Some(rx);
+                self.estado = Estado::Executando;
+            }
+            Some(Acao::Fechar) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            None => {}
         }
     }
+}
+
+fn main() -> eframe::Result<()> {
+    let opcoes = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([470.0, 330.0])
+            .with_decorations(false)
+            .with_always_on_top()
+            .with_resizable(false),
+        ..Default::default()
+    };
+    eframe::run_native(
+        "ScreenFix Tools",
+        opcoes,
+        Box::new(|cc| {
+            cc.egui_ctx.set_visuals(egui::Visuals::dark());
+            Ok(Box::new(App { estado: Estado::Confirmar, rx: None }))
+        }),
+    )
 }
