@@ -4,6 +4,16 @@ use std::path::Path;
 use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use winreg::enums::*;
 use winreg::RegKey;
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, LUID};
+use windows_sys::Win32::Security::{
+    AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED,
+    TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
+};
+use windows_sys::Win32::System::Registry::{
+    RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_WRITE, REG_DWORD,
+    REG_OPTION_BACKUP_RESTORE,
+};
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 const SYS_DIR: &str = r"C:\Windows\SystemApps\MicrosoftWindows.Client.CBS_cw5n1h2txyewy";
 const EXE_NAME: &str = "ScreenClippingHost.exe";
@@ -73,6 +83,66 @@ fn instalar_screen_clipping() {
     }
 }
 
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// Liga um privilégio no token do processo (vem desligado por padrão, mesmo como admin).
+unsafe fn ativar_privilegio(nome: &str) -> bool {
+    let mut token: HANDLE = 0;
+    if OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut token) == 0 {
+        return false;
+    }
+    let mut luid = LUID { LowPart: 0, HighPart: 0 };
+    let n = wide(nome);
+    if LookupPrivilegeValueW(std::ptr::null(), n.as_ptr(), &mut luid) == 0 {
+        CloseHandle(token);
+        return false;
+    }
+    let tp = TOKEN_PRIVILEGES {
+        PrivilegeCount: 1,
+        Privileges: [LUID_AND_ATTRIBUTES { Luid: luid, Attributes: SE_PRIVILEGE_ENABLED }],
+    };
+    let ok = AdjustTokenPrivileges(token, 0, &tp, 0, std::ptr::null_mut(), std::ptr::null_mut()) != 0
+        && GetLastError() == 0; // 1300 = ERROR_NOT_ALL_ASSIGNED (não tinha o privilégio)
+    CloseHandle(token);
+    ok
+}
+
+/// Grava HKLM\...\Control Panel\Settings\Network\ReplaceVan ignorando o dono (TrustedInstaller),
+/// usando os privilégios de Backup/Restauração do administrador.
+fn gravar_replace_van(valor: u32) -> Result<(), String> {
+    unsafe {
+        if !(ativar_privilegio("SeBackupPrivilege") && ativar_privilegio("SeRestorePrivilege")) {
+            return Err("Não consegui ativar os privilégios de Backup/Restauração.\nRode o programa como Administrador.".into());
+        }
+        let caminho = wide(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Control Panel\Settings\Network");
+        let mut hkey: HKEY = 0;
+        let rc = RegCreateKeyExW(
+            HKEY_LOCAL_MACHINE,
+            caminho.as_ptr(),
+            0,
+            std::ptr::null(),
+            REG_OPTION_BACKUP_RESTORE,
+            KEY_WRITE,
+            std::ptr::null(),
+            &mut hkey,
+            std::ptr::null_mut(),
+        );
+        if rc != 0 {
+            return Err(format!("Não consegui abrir a chave (erro {}).", rc));
+        }
+        let nome = wide("ReplaceVan");
+        let dados = valor.to_le_bytes();
+        let rc = RegSetValueExW(hkey, nome.as_ptr(), 0, REG_DWORD, dados.as_ptr(), 4);
+        RegCloseKey(hkey);
+        if rc != 0 {
+            return Err(format!("Não consegui gravar o valor (erro {}).", rc));
+        }
+        Ok(())
+    }
+}
+
 fn ativar_rede_classica() {
     let r = MessageDialog::new()
         .set_level(MessageLevel::Warning)
@@ -80,6 +150,7 @@ fn ativar_rede_classica() {
         .set_description(
             "Ativa o painel de Wi-Fi estilo antigo (Windows 7/8),\n\
             onde a lista de redes abre numa janelinha em vez do app Configurações.\n\n\
+            Vai gravar ReplaceVan = 2 no Registro.\n\
             Reinicie o computador depois para aplicar.\n\n\
             Deseja continuar?"
         )
@@ -87,12 +158,9 @@ fn ativar_rede_classica() {
         .show();
 
     if let MessageDialogResult::Yes = r {
-        let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-        match hklm.create_subkey(
-            r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\NewNetworkWindowOff"
-        ) {
-            Ok(_)  => show_ok("Painel de rede clássico ativado!\n\nReinicie o Windows para aplicar."),
-            Err(e) => show_error(&format!("Erro ao modificar o Registro:\n{}\n\nTente rodar como Administrador.", e)),
+        match gravar_replace_van(2) {
+            Ok(())  => show_ok("Painel de rede clássico ativado!\n\nReinicie o Windows para aplicar."),
+            Err(e)  => show_error(&format!("Erro ao modificar o Registro:\n{}", e)),
         }
     }
 }
