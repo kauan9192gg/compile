@@ -1,5 +1,5 @@
 [package]
-name = "atalho-captura"
+name = "configurar-atalho"
 version = "0.1.0"
 edition = "2021"
 
@@ -9,5 +9,4 @@ edition = "2021"
 opt-level = "z"
 lto = true
 codegen-units = 1
-panic = "abort"
 strip = true
