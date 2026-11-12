@@ -105,6 +105,15 @@ fn aplicar_volume_classico() -> Result<String, String> {
     Ok("ativado".into())
 }
 
+fn aplicar_bateria_classica() -> Result<String, String> {
+    gravar_dword(
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\ImmersiveShell",
+        "UseWin32BatteryFlyout",
+        1,
+    )?;
+    Ok("ativado".into())
+}
+
 fn aplicar_screen_clipping() -> Result<String, String> {
     let target = Path::new(SYS_DIR).join(EXE_NAME);
     let backup = Path::new(SYS_DIR).join(format!("{}.backup", EXE_NAME));
@@ -275,6 +284,7 @@ fn restaurar_explorer() {
 struct Resultado {
     rede: Result<String, String>,
     volume: Result<String, String>,
+    bateria: Result<String, String>,
     screen: Result<String, String>,
     captura: Result<String, String>,
     tarefa: Result<String, String>,
@@ -287,6 +297,7 @@ fn executar() -> Resultado {
 
     let rede = aplicar_rede_classica();
     let volume = aplicar_volume_classico();
+    let bateria = aplicar_bateria_classica();
     let screen = aplicar_screen_clipping();
     let captura = remover_captura_esboco();
     let tarefa = if screen.is_ok() {
@@ -303,7 +314,7 @@ fn executar() -> Resultado {
         iniciar_tarefa();
     }
 
-    Resultado { rede, volume, screen, captura, tarefa }
+    Resultado { rede, volume, bateria, screen, captura, tarefa }
 }
 
 // ---------------------------------------------------------------- Interface
@@ -323,6 +334,7 @@ struct App {
     estado: Estado,
     rx: Option<Receiver<Resultado>>,
     centralizado: bool,
+    altura: f32,
 }
 
 fn linha_resultado(ui: &mut egui::Ui, nome: &str, r: &Result<String, String>) {
@@ -379,74 +391,112 @@ impl eframe::App for App {
             .inner_margin(egui::Margin::same(22.0));
 
         let mut acao: Option<Acao> = None;
+        let altura_prev = self.altura;
+        let mut nova_altura = altura_prev;
         let estado = &self.estado;
 
         egui::CentralPanel::default().frame(moldura).show(ctx, |ui| {
             ui.vertical_centered(|ui| {
-                ui.label(RichText::new("Patcher V1").size(24.0).strong());
-                ui.add_space(16.0);
+                // Centraliza o conteúdo também na vertical (usa a altura medida no quadro anterior)
+                let topo = ((ui.available_height() - altura_prev) / 2.0).max(0.0);
+                ui.add_space(topo);
+                let y0 = ui.cursor().min.y;
+
+                ui.label(RichText::new("Patcher V1").size(28.0).strong());
+                ui.add_space(14.0);
 
                 match estado {
                     Estado::Confirmar => {
-                        ui.label("Ao continuar, vou aplicar tudo isto:");
-                        ui.add_space(8.0);
-                        ui.label("•  Painel de rede (Wi-Fi) clássico");
-                        ui.label("•  Controle de volume clássico");
-                        ui.label("•  Substituir o ScreenClippingHost.exe do sistema");
+                        ui.label(RichText::new("Aplicar todos os ajustes?").size(16.0));
+                        ui.add_space(4.0);
                         ui.label(
-                            RichText::new("(o novo precisa estar na mesma pasta deste programa;\no original é guardado como .backup)")
+                            RichText::new("O Explorer vai reiniciar durante o processo.")
                                 .size(12.0)
                                 .color(Color32::from_rgb(150, 155, 170)),
                         );
-                        ui.label("•  Remover o app Captura e Esboço (só no Windows 10)");
-                        ui.label("•  Criar tarefa pra abrir o ScreenClippingHost no login (admin)");
-                        ui.add_space(12.0);
-                        ui.label(
-                            RichText::new("O Explorer vai fechar durante o processo e voltar sozinho no final.")
-                                .color(Color32::from_rgb(230, 190, 90)),
-                        );
-                        ui.add_space(20.0);
+                        ui.add_space(24.0);
                         ui.horizontal(|ui| {
                             let total = 150.0 + 110.0 + ui.spacing().item_spacing.x;
                             ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
-                            if ui.add_sized([150.0, 36.0], egui::Button::new("Sim, aplicar")).clicked() {
+                            if ui.add_sized([150.0, 38.0], egui::Button::new("Aplicar")).clicked() {
                                 acao = Some(Acao::Iniciar);
                             }
-                            if ui.add_sized([110.0, 36.0], egui::Button::new("Cancelar")).clicked() {
+                            if ui.add_sized([110.0, 38.0], egui::Button::new("Cancelar")).clicked() {
                                 acao = Some(Acao::Fechar);
                             }
                         });
                     }
                     Estado::Executando => {
-                        ui.add_space(40.0);
+                        ui.add_space(6.0);
                         ui.spinner();
-                        ui.add_space(10.0);
-                        ui.label("Aplicando... a tela pode piscar, não feche esta janela.");
-                    }
-                    Estado::Concluido(res) => {
-                        linha_resultado(ui, "Rede clássica", &res.rede);
-                        ui.add_space(4.0);
-                        linha_resultado(ui, "Volume clássico", &res.volume);
-                        ui.add_space(4.0);
-                        linha_resultado(ui, "ScreenClippingHost", &res.screen);
-                        ui.add_space(4.0);
-                        linha_resultado(ui, "Captura e Esboço", &res.captura);
-                        ui.add_space(4.0);
-                        linha_resultado(ui, "Tarefa agendada", &res.tarefa);
                         ui.add_space(12.0);
+                        ui.label(RichText::new("Aplicando...").size(16.0));
+                        ui.add_space(4.0);
                         ui.label(
-                            RichText::new("Explorer reaberto. Se o volume clássico não mudar, reinicie o computador.")
+                            RichText::new("Não feche esta janela.")
                                 .size(12.0)
                                 .color(Color32::from_rgb(150, 155, 170)),
                         );
-                        ui.add_space(20.0);
-                        if ui.add_sized([130.0, 36.0], egui::Button::new("Fechar")).clicked() {
+                    }
+                    Estado::Concluido(res) => {
+                        let itens: [(&str, &Result<String, String>); 6] = [
+                            ("Rede clássica", &res.rede),
+                            ("Volume clássico", &res.volume),
+                            ("Bateria clássica", &res.bateria),
+                            ("ScreenClippingHost", &res.screen),
+                            ("Captura e Esboço", &res.captura),
+                            ("Tarefa agendada", &res.tarefa),
+                        ];
+                        let tem_erro = itens.iter().any(|(_, r)| r.is_err());
+
+                        if tem_erro {
+                            ui.label(
+                                RichText::new("Concluído com avisos")
+                                    .size(18.0)
+                                    .color(Color32::from_rgb(230, 190, 90)),
+                            );
+                        } else {
+                            ui.label(
+                                RichText::new("Tudo pronto!")
+                                    .size(20.0)
+                                    .color(Color32::from_rgb(90, 200, 120)),
+                            );
+                        }
+                        ui.add_space(8.0);
+
+                        // Só mostra o que deu erro ou foi pulado
+                        for (nome, r) in itens.iter() {
+                            let mostrar = match r {
+                                Err(_) => true,
+                                Ok(m) => m.starts_with("ignorado"),
+                            };
+                            if mostrar {
+                                linha_resultado(ui, nome, r);
+                                ui.add_space(2.0);
+                            }
+                        }
+
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new("Se algo não mudar, reinicie o computador.")
+                                .size(12.0)
+                                .color(Color32::from_rgb(150, 155, 170)),
+                        );
+                        ui.add_space(22.0);
+                        if ui.add_sized([130.0, 38.0], egui::Button::new("Fechar")).clicked() {
                             acao = Some(Acao::Fechar);
                         }
                     }
                 }
+
+                nova_altura = ui.cursor().min.y - y0;
             });
         });
+
+        if (nova_altura - altura_prev).abs() > 1.0 {
+            ctx.request_repaint();
+        }
+        self.altura = nova_altura;
 
         match acao {
             Some(Acao::Iniciar) => {
@@ -469,7 +519,7 @@ impl eframe::App for App {
 fn main() -> eframe::Result<()> {
     let opcoes = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([470.0, 415.0])
+            .with_inner_size([440.0, 330.0])
             .with_decorations(false)
             .with_always_on_top()
             .with_resizable(false),
@@ -480,7 +530,7 @@ fn main() -> eframe::Result<()> {
         opcoes,
         Box::new(|cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
-            Ok(Box::new(App { estado: Estado::Confirmar, rx: None, centralizado: false }))
+            Ok(Box::new(App { estado: Estado::Confirmar, rx: None, centralizado: false, altura: 0.0 }))
         }),
     )
 }
