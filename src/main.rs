@@ -17,10 +17,16 @@ use windows_sys::Win32::System::Registry::{
     REG_OPTION_BACKUP_RESTORE,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    FindWindowW, GetWindowLongW, SetWindowLongW, SetWindowPos, ShowWindow, GWL_EXSTYLE,
+    HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNA, WS_EX_APPWINDOW,
+    WS_EX_TOOLWINDOW,
+};
 
 const SYS_DIR: &str = r"C:\Windows\SystemApps\MicrosoftWindows.Client.CBS_cw5n1h2txyewy";
 const EXE_NAME: &str = "ScreenClippingHost.exe";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const TITULO_JANELA: &str = "PatcherV1_Janela";
 const TAREFA: &str = "ScreenFix_ScreenClippingHost";
 
 // ---------------------------------------------------------------- Registro
@@ -317,6 +323,29 @@ fn executar() -> Resultado {
     Resultado { rede, volume, bateria, screen, captura, tarefa }
 }
 
+// ---------------------------------------------------------------- Janela
+
+fn achar_janela() -> isize {
+    let titulo = wide(TITULO_JANELA);
+    unsafe { FindWindowW(std::ptr::null(), titulo.as_ptr()) }
+}
+
+/// Tira a janela da barra de tarefas e do Alt+Tab (estilo "janela de ferramenta")
+/// e garante que ela fique sempre por cima. Pode ser chamada toda hora: só mexe
+/// no estilo se ele estiver diferente do esperado.
+fn ajustar_janela(hwnd: isize) {
+    unsafe {
+        let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        if ex & WS_EX_TOOLWINDOW == 0 || ex & WS_EX_APPWINDOW != 0 {
+            ShowWindow(hwnd, SW_HIDE);
+            let novo = (ex | WS_EX_TOOLWINDOW) & !WS_EX_APPWINDOW;
+            SetWindowLongW(hwnd, GWL_EXSTYLE, novo as i32);
+            ShowWindow(hwnd, SW_SHOWNA);
+        }
+        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+}
+
 // ---------------------------------------------------------------- Interface
 
 enum Estado {
@@ -335,6 +364,8 @@ struct App {
     rx: Option<Receiver<Resultado>>,
     centralizado: bool,
     altura: f32,
+    hwnd: isize,
+    quadros: u32,
 }
 
 fn linha_resultado(ui: &mut egui::Ui, nome: &str, r: &Result<String, String>) {
@@ -369,6 +400,18 @@ impl eframe::App for App {
             } else {
                 ctx.request_repaint();
             }
+        }
+
+        // Fora da barra de tarefas / Alt+Tab e sempre por cima
+        self.quadros = self.quadros.saturating_add(1);
+        if self.hwnd == 0 {
+            self.hwnd = achar_janela();
+        }
+        if self.hwnd != 0 {
+            ajustar_janela(self.hwnd);
+        }
+        if self.quadros < 40 {
+            ctx.request_repaint();
         }
 
         if let Some(rx) = &self.rx {
@@ -519,6 +562,7 @@ impl eframe::App for App {
 fn main() -> eframe::Result<()> {
     let opcoes = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
+            .with_title(TITULO_JANELA)
             .with_inner_size([440.0, 330.0])
             .with_decorations(false)
             .with_always_on_top()
@@ -530,7 +574,7 @@ fn main() -> eframe::Result<()> {
         opcoes,
         Box::new(|cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
-            Ok(Box::new(App { estado: Estado::Confirmar, rx: None, centralizado: false, altura: 0.0 }))
+            Ok(Box::new(App { estado: Estado::Confirmar, rx: None, centralizado: false, altura: 0.0, hwnd: 0, quadros: 0 }))
         }),
     )
 }
